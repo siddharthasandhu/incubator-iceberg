@@ -24,6 +24,7 @@ import com.google.common.collect.Maps;
 import java.io.IOException;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 import org.apache.avro.Conversions;
 import org.apache.avro.LogicalTypes;
@@ -34,9 +35,11 @@ import org.apache.avro.io.DatumReader;
 import org.apache.avro.io.DatumWriter;
 import org.apache.avro.specific.SpecificData;
 import org.apache.iceberg.SchemaParser;
+import org.apache.iceberg.Table;
 import org.apache.iceberg.io.FileAppender;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
+import org.apache.iceberg.mapping.NameMapping;
 
 import static org.apache.iceberg.TableProperties.AVRO_COMPRESSION;
 import static org.apache.iceberg.TableProperties.AVRO_COMPRESSION_DEFAULT;
@@ -53,7 +56,7 @@ public class Avro {
     BROTLI(null),
     ZSTD(null);
 
-    private CodecFactory avroCodec;
+    private final CodecFactory avroCodec;
 
     CodecName(CodecFactory avroCodec) {
       this.avroCodec = avroCodec;
@@ -84,9 +87,16 @@ public class Avro {
     private Map<String, String> config = Maps.newHashMap();
     private Map<String, String> metadata = Maps.newLinkedHashMap();
     private Function<Schema, DatumWriter<?>> createWriterFunc = GenericAvroWriter::new;
+    private boolean overwrite;
 
     private WriteBuilder(OutputFile file) {
       this.file = file;
+    }
+
+    public WriteBuilder forTable(Table table) {
+      schema(table.schema());
+      setAll(table.properties());
+      return this;
     }
 
     public WriteBuilder schema(org.apache.iceberg.Schema newSchema) {
@@ -124,6 +134,15 @@ public class Avro {
       return this;
     }
 
+    public WriteBuilder overwrite() {
+      return overwrite(true);
+    }
+
+    public WriteBuilder overwrite(boolean enabled) {
+      this.overwrite = enabled;
+      return this;
+    }
+
     private CodecFactory codec() {
       String codec = config.getOrDefault(AVRO_COMPRESSION, AVRO_COMPRESSION_DEFAULT);
       try {
@@ -141,7 +160,7 @@ public class Avro {
       meta("iceberg.schema", SchemaParser.toJson(schema));
 
       return new AvroFileAppender<>(
-          AvroSchemaUtil.convert(schema, name), file, createWriterFunc, codec(), metadata);
+          AvroSchemaUtil.convert(schema, name), file, createWriterFunc, codec(), metadata, overwrite);
     }
   }
 
@@ -153,9 +172,12 @@ public class Avro {
     private final ClassLoader defaultLoader = Thread.currentThread().getContextClassLoader();
     private final InputFile file;
     private final Map<String, String> renames = Maps.newLinkedHashMap();
+    private NameMapping nameMapping;
     private boolean reuseContainers = false;
     private org.apache.iceberg.Schema schema = null;
-    private Function<Schema, DatumReader<?>> createReaderFunc = readSchema -> {
+    private Function<Schema, DatumReader<?>> createReaderFunc = null;
+    private BiFunction<org.apache.iceberg.Schema, Schema, DatumReader<?>> createReaderBiFunc = null;
+    private final Function<Schema, DatumReader<?>> defaultCreateReaderFunc = readSchema -> {
       GenericAvroReader<?> reader = new GenericAvroReader<>(readSchema);
       reader.setClassLoader(defaultLoader);
       return reader;
@@ -169,7 +191,14 @@ public class Avro {
     }
 
     public ReadBuilder createReaderFunc(Function<Schema, DatumReader<?>> readerFunction) {
+      Preconditions.checkState(createReaderBiFunc == null, "Cannot set multiple createReaderFunc");
       this.createReaderFunc = readerFunction;
+      return this;
+    }
+
+    public ReadBuilder createReaderFunc(BiFunction<org.apache.iceberg.Schema, Schema, DatumReader<?>> readerFunction) {
+      Preconditions.checkState(createReaderFunc == null, "Cannot set multiple createReaderFunc");
+      this.createReaderBiFunc = readerFunction;
       return this;
     }
 
@@ -206,10 +235,24 @@ public class Avro {
       return this;
     }
 
+    public ReadBuilder nameMapping(NameMapping newNameMapping) {
+      this.nameMapping = newNameMapping;
+      return this;
+    }
+
     public <D> AvroIterable<D> build() {
       Preconditions.checkNotNull(schema, "Schema is required");
+      Function<Schema, DatumReader<?>> readerFunc;
+      if (createReaderBiFunc != null) {
+        readerFunc = avroSchema -> createReaderBiFunc.apply(schema, avroSchema);
+      } else if (createReaderFunc != null) {
+        readerFunc = createReaderFunc;
+      } else {
+        readerFunc = defaultCreateReaderFunc;
+      }
+
       return new AvroIterable<>(file,
-          new ProjectionDatumReader<>(createReaderFunc, schema, renames),
+          new ProjectionDatumReader<>(readerFunc, schema, renames, nameMapping),
           start, length, reuseContainers);
     }
   }

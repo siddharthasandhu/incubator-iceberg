@@ -16,14 +16,32 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+
 package org.apache.iceberg.catalog;
 
+import com.google.common.base.Joiner;
+import java.util.Arrays;
+
 /**
- * Identifies a namespace in iceberg catalog
+ * A namespace in a {@link Catalog}.
  */
 public class Namespace {
+  private static final Namespace EMPTY_NAMESPACE = new Namespace(new String[] {});
+  private static final Joiner DOT = Joiner.on('.');
+
+  public static Namespace empty() {
+    return EMPTY_NAMESPACE;
+  }
+
+  public static Namespace of(String... levels) {
+    if (levels.length == 0) {
+      return empty();
+    }
+
+    return new Namespace(levels);
+  }
+
   private final String[] levels;
-  private static final Namespace EMPTY = new Namespace(new String[] {});
 
   private Namespace(String[] levels) {
     this.levels = levels;
@@ -33,19 +51,35 @@ public class Namespace {
     return levels;
   }
 
-  public boolean isEmpty() {
-    return this.equals(Namespace.EMPTY);
+  public String level(int pos) {
+    return levels[pos];
   }
 
-  public static Namespace namespace(String[] levels) {
-    if (levels == null || levels.length == 0) {
-      return Namespace.EMPTY;
+  public boolean isEmpty() {
+    return levels.length == 0;
+  }
+
+  @Override
+  public boolean equals(Object other) {
+    if (this == other) {
+      return true;
     }
 
-    return new Namespace(levels);
+    if (other == null || getClass() != other.getClass()) {
+      return false;
+    }
+
+    Namespace namespace = (Namespace) other;
+    return Arrays.equals(levels, namespace.levels);
   }
 
-  public static Namespace empty() {
-    return EMPTY;
+  @Override
+  public int hashCode() {
+    return Arrays.hashCode(levels);
+  }
+
+  @Override
+  public String toString() {
+    return DOT.join(levels);
   }
 }

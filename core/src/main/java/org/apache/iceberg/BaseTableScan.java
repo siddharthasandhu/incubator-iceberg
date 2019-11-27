@@ -19,54 +19,38 @@
 
 package org.apache.iceberg;
 
-import com.github.benmanes.caffeine.cache.Caffeine;
-import com.github.benmanes.caffeine.cache.LoadingCache;
-import com.google.common.base.Objects;
+import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.FluentIterable;
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Iterables;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Sets;
-import java.text.SimpleDateFormat;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.Date;
-import java.util.List;
 import java.util.Set;
 import java.util.function.Function;
-import org.apache.iceberg.TableMetadata.SnapshotLogEntry;
 import org.apache.iceberg.events.Listeners;
 import org.apache.iceberg.events.ScanEvent;
 import org.apache.iceberg.expressions.Binder;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
-import org.apache.iceberg.expressions.InclusiveManifestEvaluator;
-import org.apache.iceberg.expressions.ResidualEvaluator;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.types.TypeUtil;
 import org.apache.iceberg.util.BinPacking;
-import org.apache.iceberg.util.ParallelIterable;
-import org.apache.iceberg.util.ThreadPools;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * Base class for {@link TableScan} implementations.
  */
-class BaseTableScan implements TableScan {
+@SuppressWarnings("checkstyle:OverloadMethodsDeclarationOrder")
+abstract class BaseTableScan implements TableScan {
   private static final Logger LOG = LoggerFactory.getLogger(TableScan.class);
 
-  private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS");
-  private static final List<String> SCAN_COLUMNS = ImmutableList.of(
-      "snapshot_id", "file_path", "file_ordinal", "file_format", "block_size_in_bytes",
-      "file_size_in_bytes", "record_count", "partition"
-  );
-  private static final List<String> SCAN_WITH_STATS_COLUMNS = ImmutableList.<String>builder()
-      .addAll(SCAN_COLUMNS)
-      .add("value_counts", "null_value_counts", "lower_bounds", "upper_bounds")
-      .build();
-  private static final boolean PLAN_SCANS_WITH_WORKER_POOL =
-      SystemProperties.getBoolean(SystemProperties.SCAN_THREAD_POOL_ENABLED, true);
+  private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
 
   private final TableOperations ops;
   private final Table table;
@@ -76,15 +60,15 @@ class BaseTableScan implements TableScan {
   private final boolean caseSensitive;
   private final boolean colStats;
   private final Collection<String> selectedColumns;
-  private final LoadingCache<Integer, InclusiveManifestEvaluator> evalCache;
+  private final ImmutableMap<String, String> options;
 
-  BaseTableScan(TableOperations ops, Table table) {
-    this(ops, table, null, table.schema(), Expressions.alwaysTrue(), true, false, null);
+  protected BaseTableScan(TableOperations ops, Table table, Schema schema) {
+    this(ops, table, null, schema, Expressions.alwaysTrue(), true, false, null, ImmutableMap.of());
   }
 
-  private BaseTableScan(TableOperations ops, Table table, Long snapshotId, Schema schema,
+  protected BaseTableScan(TableOperations ops, Table table, Long snapshotId, Schema schema,
                         Expression rowFilter, boolean caseSensitive, boolean colStats,
-                        Collection<String> selectedColumns) {
+                        Collection<String> selectedColumns, ImmutableMap<String, String> options) {
     this.ops = ops;
     this.table = table;
     this.snapshotId = snapshotId;
@@ -93,11 +77,21 @@ class BaseTableScan implements TableScan {
     this.caseSensitive = caseSensitive;
     this.colStats = colStats;
     this.selectedColumns = selectedColumns;
-    this.evalCache = Caffeine.newBuilder().build(specId -> {
-      PartitionSpec spec = ops.current().spec(specId);
-      return new InclusiveManifestEvaluator(spec, rowFilter, caseSensitive);
-    });
+    this.options = options != null ? options : ImmutableMap.of();
   }
+
+  @SuppressWarnings("checkstyle:HiddenField")
+  protected abstract long targetSplitSize(TableOperations ops);
+
+  @SuppressWarnings("checkstyle:HiddenField")
+  protected abstract TableScan newRefinedScan(
+      TableOperations ops, Table table, Long snapshotId, Schema schema, Expression rowFilter,
+      boolean caseSensitive, boolean colStats, Collection<String> selectedColumns,
+      ImmutableMap<String, String> options);
+
+  @SuppressWarnings("checkstyle:HiddenField")
+  protected abstract CloseableIterable<FileScanTask> planFiles(
+      TableOperations ops, Snapshot snapshot, Expression rowFilter, boolean caseSensitive, boolean colStats);
 
   @Override
   public Table table() {
@@ -110,7 +104,8 @@ class BaseTableScan implements TableScan {
         "Cannot override snapshot, already set to id=%s", scanSnapshotId);
     Preconditions.checkArgument(ops.current().snapshot(scanSnapshotId) != null,
         "Cannot find snapshot with ID %s", scanSnapshotId);
-    return new BaseTableScan(ops, table, scanSnapshotId, schema, rowFilter, caseSensitive, colStats, selectedColumns);
+    return newRefinedScan(
+        ops, table, scanSnapshotId, schema, rowFilter, caseSensitive, colStats, selectedColumns, options);
   }
 
   @Override
@@ -119,7 +114,7 @@ class BaseTableScan implements TableScan {
         "Cannot override snapshot, already set to id=%s", snapshotId);
 
     Long lastSnapshotId = null;
-    for (SnapshotLogEntry logEntry : ops.current().snapshotLog()) {
+    for (HistoryEntry logEntry : ops.current().snapshotLog()) {
       if (logEntry.timestampMillis() <= timestampMillis) {
         lastSnapshotId = logEntry.snapshotId();
       }
@@ -128,36 +123,47 @@ class BaseTableScan implements TableScan {
     // the snapshot ID could be null if no entries were older than the requested time. in that case,
     // there is no valid snapshot to read.
     Preconditions.checkArgument(lastSnapshotId != null,
-        "Cannot find a snapshot older than %s", DATE_FORMAT.format(new Date(timestampMillis)));
+        "Cannot find a snapshot older than %s", formatTimestampMillis(timestampMillis));
 
     return useSnapshot(lastSnapshotId);
   }
 
   @Override
+  public TableScan option(String property, String value) {
+    ImmutableMap.Builder<String, String> builder = ImmutableMap.builder();
+    builder.putAll(options);
+    builder.put(property, value);
+
+    return newRefinedScan(
+        ops, table, snapshotId, schema, rowFilter, caseSensitive, colStats, selectedColumns, builder.build());
+  }
+
+  @Override
   public TableScan project(Schema projectedSchema) {
-    return new BaseTableScan(
-        ops, table, snapshotId, projectedSchema, rowFilter, caseSensitive, colStats, selectedColumns);
+    return newRefinedScan(
+        ops, table, snapshotId, projectedSchema, rowFilter, caseSensitive, colStats, selectedColumns, options);
   }
 
   @Override
   public TableScan caseSensitive(boolean scanCaseSensitive) {
-    return new BaseTableScan(ops, table, snapshotId, schema, rowFilter, scanCaseSensitive, colStats, selectedColumns);
+    return newRefinedScan(
+        ops, table, snapshotId, schema, rowFilter, scanCaseSensitive, colStats, selectedColumns, options);
   }
 
   @Override
   public TableScan includeColumnStats() {
-    return new BaseTableScan(ops, table, snapshotId, schema, rowFilter, caseSensitive, true, selectedColumns);
+    return newRefinedScan(ops, table, snapshotId, schema, rowFilter, caseSensitive, true, selectedColumns, options);
   }
 
   @Override
   public TableScan select(Collection<String> columns) {
-    return new BaseTableScan(ops, table, snapshotId, schema, rowFilter, caseSensitive, colStats, columns);
+    return newRefinedScan(ops, table, snapshotId, schema, rowFilter, caseSensitive, colStats, columns, options);
   }
 
   @Override
   public TableScan filter(Expression expr) {
-    return new BaseTableScan(
-        ops, table, snapshotId, schema, Expressions.and(rowFilter, expr), caseSensitive, colStats, selectedColumns);
+    return newRefinedScan(ops, table, snapshotId, schema, Expressions.and(rowFilter, expr), caseSensitive, colStats,
+        selectedColumns, options);
   }
 
   @Override
@@ -167,42 +173,16 @@ class BaseTableScan implements TableScan {
 
   @Override
   public CloseableIterable<FileScanTask> planFiles() {
-    Snapshot snapshot = snapshotId != null ?
-        ops.current().snapshot(snapshotId) :
-        ops.current().currentSnapshot();
-
+    Snapshot snapshot = snapshot();
     if (snapshot != null) {
       LOG.info("Scanning table {} snapshot {} created at {} with filter {}", table,
-          snapshot.snapshotId(), DATE_FORMAT.format(new Date(snapshot.timestampMillis())),
+          snapshot.snapshotId(), formatTimestampMillis(snapshot.timestampMillis()),
           rowFilter);
 
       Listeners.notifyAll(
           new ScanEvent(table.toString(), snapshot.snapshotId(), rowFilter, schema()));
 
-      Iterable<ManifestFile> matchingManifests = Iterables.filter(snapshot.manifests(),
-          manifest -> evalCache.get(manifest.partitionSpecId()).eval(manifest));
-
-      Iterable<CloseableIterable<FileScanTask>> readers = Iterables.transform(
-          matchingManifests,
-          manifest -> {
-              ManifestReader reader = ManifestReader
-                  .read(ops.io().newInputFile(manifest.path()), ops.current()::spec)
-                  .caseSensitive(caseSensitive);
-            PartitionSpec spec = ops.current().spec(manifest.partitionSpecId());
-            String schemaString = SchemaParser.toJson(spec.schema());
-            String specString = PartitionSpecParser.toJson(spec);
-            ResidualEvaluator residuals = new ResidualEvaluator(spec, rowFilter, caseSensitive);
-            return CloseableIterable.transform(
-                reader.filterRows(rowFilter).select(colStats ? SCAN_WITH_STATS_COLUMNS : SCAN_COLUMNS),
-                file -> new BaseFileScanTask(file, schemaString, specString, residuals)
-            );
-          });
-
-      if (PLAN_SCANS_WITH_WORKER_POOL && snapshot.manifests().size() > 1) {
-        return new ParallelIterable<>(readers, ThreadPools.getWorkerPool());
-      } else {
-        return CloseableIterable.concat(readers);
-      }
+      return planFiles(ops, snapshot, rowFilter, caseSensitive, colStats);
 
     } else {
       LOG.info("Scanning empty table {}", table);
@@ -212,12 +192,26 @@ class BaseTableScan implements TableScan {
 
   @Override
   public CloseableIterable<CombinedScanTask> planTasks() {
-    long splitSize = ops.current().propertyAsLong(
-        TableProperties.SPLIT_SIZE, TableProperties.SPLIT_SIZE_DEFAULT);
-    int lookback = ops.current().propertyAsInt(
-        TableProperties.SPLIT_LOOKBACK, TableProperties.SPLIT_LOOKBACK_DEFAULT);
-    long openFileCost = ops.current().propertyAsLong(
-        TableProperties.SPLIT_OPEN_FILE_COST, TableProperties.SPLIT_OPEN_FILE_COST_DEFAULT);
+    long splitSize;
+    if (options.containsKey(TableProperties.SPLIT_SIZE)) {
+      splitSize = Long.parseLong(options.get(TableProperties.SPLIT_SIZE));
+    } else {
+      splitSize = targetSplitSize(ops);
+    }
+    int lookback;
+    if (options.containsKey(TableProperties.SPLIT_LOOKBACK)) {
+      lookback = Integer.parseInt(options.get(TableProperties.SPLIT_LOOKBACK));
+    } else {
+      lookback = ops.current().propertyAsInt(
+          TableProperties.SPLIT_LOOKBACK, TableProperties.SPLIT_LOOKBACK_DEFAULT);
+    }
+    long openFileCost;
+    if (options.containsKey(TableProperties.SPLIT_OPEN_FILE_COST)) {
+      openFileCost = Long.parseLong(options.get(TableProperties.SPLIT_OPEN_FILE_COST));
+    } else {
+      openFileCost = ops.current().propertyAsLong(
+          TableProperties.SPLIT_OPEN_FILE_COST, TableProperties.SPLIT_OPEN_FILE_COST_DEFAULT);
+    }
 
     Function<FileScanTask, Long> weightFunc = file -> Math.max(file.length(), openFileCost);
 
@@ -235,13 +229,20 @@ class BaseTableScan implements TableScan {
   }
 
   @Override
+  public Snapshot snapshot() {
+    return snapshotId != null ?
+        ops.current().snapshot(snapshotId) :
+        ops.current().currentSnapshot();
+  }
+
+  @Override
   public boolean isCaseSensitive() {
     return caseSensitive;
   }
 
   @Override
   public String toString() {
-    return Objects.toStringHelper(this)
+    return MoreObjects.toStringHelper(this)
         .add("table", table)
         .add("projection", schema().asStruct())
         .add("filter", rowFilter)
@@ -285,5 +286,9 @@ class BaseTableScan implements TableScan {
     }
 
     return schema;
+  }
+
+  private static String formatTimestampMillis(long millis) {
+    return DATE_FORMAT.format(LocalDateTime.ofInstant(Instant.ofEpochMilli(millis), ZoneId.systemDefault()));
   }
 }

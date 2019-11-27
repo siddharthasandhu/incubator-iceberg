@@ -19,7 +19,7 @@
 
 package org.apache.iceberg.expressions;
 
-import org.apache.iceberg.TestHelpers;
+import org.apache.iceberg.AssertHelpers;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -73,7 +73,23 @@ public class TestExpressionHelpers {
 
   @Test
   public void testNullName() {
-    TestHelpers.assertThrows("Should catch null column names when creating expressions",
+    AssertHelpers.assertThrows("Should catch null column names when creating expressions",
         NullPointerException.class, "Name cannot be null", () -> equal(null, 5));
+  }
+
+  @Test
+  public void testMultiAnd() {
+    Expression expected = and(
+        and(
+          equal("a", 1),
+          equal("b", 2)),
+        equal("c", 3));
+
+    Expression actual = and(
+        equal("a", 1),
+        equal("b", 2),
+        equal("c", 3));
+
+    Assert.assertEquals(expected.toString(), actual.toString());
   }
 }

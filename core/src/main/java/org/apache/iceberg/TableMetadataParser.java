@@ -27,28 +27,63 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.StringWriter;
 import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.SortedSet;
-import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
-import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream;
-import org.apache.hadoop.conf.Configuration;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.GZIPOutputStream;
+import org.apache.iceberg.TableMetadata.MetadataLogEntry;
 import org.apache.iceberg.TableMetadata.SnapshotLogEntry;
 import org.apache.iceberg.exceptions.RuntimeIOException;
+import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.util.JsonUtil;
 
 public class TableMetadataParser {
 
+  public enum Codec {
+    NONE(""),
+    GZIP(".gz");
+
+    private final String extension;
+
+    Codec(String extension) {
+      this.extension = extension;
+    }
+
+    public static Codec fromName(String codecName) {
+      Preconditions.checkArgument(codecName != null, "Codec name is null");
+      return Codec.valueOf(codecName.toUpperCase(Locale.ENGLISH));
+    }
+
+    public static Codec fromFileName(String fileName) {
+      Preconditions.checkArgument(fileName.contains(".metadata.json"),
+          "%s is not a valid metadata file", fileName);
+      // we have to be backward-compatible with .metadata.json.gz files
+      if (fileName.endsWith(".metadata.json.gz")) {
+        return Codec.GZIP;
+      }
+      String fileNameWithoutSuffix = fileName.substring(0, fileName.lastIndexOf(".metadata.json"));
+      if (fileNameWithoutSuffix.endsWith(Codec.GZIP.extension)) {
+        return Codec.GZIP;
+      } else {
+        return Codec.NONE;
+      }
+    }
+  }
+
   private TableMetadataParser() {}
 
   // visible for testing
   static final String FORMAT_VERSION = "format-version";
+  static final String TABLE_UUID = "table-uuid";
   static final String LOCATION = "location";
   static final String LAST_UPDATED_MILLIS = "last-updated-ms";
   static final String LAST_COLUMN_ID = "last-column-id";
@@ -62,12 +97,22 @@ public class TableMetadataParser {
   static final String SNAPSHOT_ID = "snapshot-id";
   static final String TIMESTAMP_MS = "timestamp-ms";
   static final String SNAPSHOT_LOG = "snapshot-log";
+  static final String METADATA_FILE = "metadata-file";
+  static final String METADATA_LOG = "metadata-log";
+
+  public static void overwrite(TableMetadata metadata, OutputFile outputFile) {
+    internalWrite(metadata, outputFile, true);
+  }
 
   public static void write(TableMetadata metadata, OutputFile outputFile) {
-    try (OutputStreamWriter writer = new OutputStreamWriter(
-            outputFile.location().endsWith(".gz") ?
-                    new GzipCompressorOutputStream(outputFile.create()) :
-                    outputFile.create())) {
+    internalWrite(metadata, outputFile, false);
+  }
+
+  public static void internalWrite(
+      TableMetadata metadata, OutputFile outputFile, boolean overwrite) {
+    boolean isGzip = Codec.fromFileName(outputFile.location()) == Codec.GZIP;
+    OutputStream stream = overwrite ? outputFile.createOrOverwrite() : outputFile.create();
+    try (OutputStreamWriter writer = new OutputStreamWriter(isGzip ? new GZIPOutputStream(stream) : stream)) {
       JsonGenerator generator = JsonUtil.factory().createGenerator(writer);
       generator.useDefaultPrettyPrinter();
       toJson(metadata, generator);
@@ -77,8 +122,17 @@ public class TableMetadataParser {
     }
   }
 
-  public static String getFileExtension(Configuration configuration) {
-    return ConfigProperties.shouldCompress(configuration) ? ".metadata.json.gz" : ".metadata.json";
+  public static String getFileExtension(String codecName) {
+    return getFileExtension(Codec.fromName(codecName));
+  }
+
+  public static String getFileExtension(Codec codec) {
+    return codec.extension + ".metadata.json";
+  }
+
+  public static String getOldFileExtension(Codec codec) {
+    // we have to be backward-compatible with .metadata.json.gz files
+    return ".metadata.json" + codec.extension;
   }
 
   public static String toJson(TableMetadata metadata) {
@@ -97,6 +151,7 @@ public class TableMetadataParser {
     generator.writeStartObject();
 
     generator.writeNumberField(FORMAT_VERSION, TableMetadata.TABLE_FORMAT_VERSION);
+    generator.writeStringField(TABLE_UUID, metadata.uuid());
     generator.writeStringField(LOCATION, metadata.location());
     generator.writeNumberField(LAST_UPDATED_MILLIS, metadata.lastUpdatedMillis());
     generator.writeNumberField(LAST_COLUMN_ID, metadata.lastColumnId());
@@ -132,7 +187,7 @@ public class TableMetadataParser {
     generator.writeEndArray();
 
     generator.writeArrayFieldStart(SNAPSHOT_LOG);
-    for (SnapshotLogEntry logEntry : metadata.snapshotLog()) {
+    for (HistoryEntry logEntry : metadata.snapshotLog()) {
       generator.writeStartObject();
       generator.writeNumberField(TIMESTAMP_MS, logEntry.timestampMillis());
       generator.writeNumberField(SNAPSHOT_ID, logEntry.snapshotId());
@@ -140,27 +195,36 @@ public class TableMetadataParser {
     }
     generator.writeEndArray();
 
+    generator.writeArrayFieldStart(METADATA_LOG);
+    for (MetadataLogEntry logEntry : metadata.previousFiles()) {
+      generator.writeStartObject();
+      generator.writeNumberField(TIMESTAMP_MS, logEntry.timestampMillis());
+      generator.writeStringField(METADATA_FILE, logEntry.file());
+      generator.writeEndObject();
+    }
+    generator.writeEndArray();
+
     generator.writeEndObject();
   }
 
-  public static TableMetadata read(TableOperations ops, InputFile file) {
-    try {
-      InputStream is =
-          file.location().endsWith("gz") ? new GzipCompressorInputStream(file.newStream()) : file.newStream();
-      return fromJson(ops, file, JsonUtil.mapper().readValue(is, JsonNode.class));
+  public static TableMetadata read(FileIO io, InputFile file) {
+    Codec codec = Codec.fromFileName(file.location());
+    try (InputStream is = codec == Codec.GZIP ? new GZIPInputStream(file.newStream()) : file.newStream()) {
+      return fromJson(io, file, JsonUtil.mapper().readValue(is, JsonNode.class));
     } catch (IOException e) {
       throw new RuntimeIOException(e, "Failed to read file: %s", file);
     }
   }
 
-  static TableMetadata fromJson(TableOperations ops, InputFile file, JsonNode node) {
+  static TableMetadata fromJson(FileIO io, InputFile file, JsonNode node) {
     Preconditions.checkArgument(node.isObject(),
         "Cannot parse metadata from a non-object: %s", node);
 
     int formatVersion = JsonUtil.getInt(FORMAT_VERSION, node);
     Preconditions.checkArgument(formatVersion == TableMetadata.TABLE_FORMAT_VERSION,
-        "Cannot read unsupported version %d", formatVersion);
+        "Cannot read unsupported version %s", formatVersion);
 
+    String uuid = JsonUtil.getStringOrNull(TABLE_UUID, node);
     String location = JsonUtil.getString(LOCATION, node);
     int lastAssignedColumnId = JsonUtil.getInt(LAST_COLUMN_ID, node);
     Schema schema = SchemaParser.fromJson(node.get(SCHEMA));
@@ -201,7 +265,7 @@ public class TableMetadataParser {
     List<Snapshot> snapshots = Lists.newArrayListWithExpectedSize(snapshotArray.size());
     Iterator<JsonNode> iterator = snapshotArray.elements();
     while (iterator.hasNext()) {
-      snapshots.add(SnapshotParser.fromJson(ops, iterator.next()));
+      snapshots.add(SnapshotParser.fromJson(io, iterator.next()));
     }
 
     SortedSet<SnapshotLogEntry> entries =
@@ -215,8 +279,20 @@ public class TableMetadataParser {
       }
     }
 
-    return new TableMetadata(ops, file, location,
+    SortedSet<MetadataLogEntry> metadataEntries =
+            Sets.newTreeSet(Comparator.comparingLong(MetadataLogEntry::timestampMillis));
+    if (node.has(METADATA_LOG)) {
+      Iterator<JsonNode> logIterator = node.get(METADATA_LOG).elements();
+      while (logIterator.hasNext()) {
+        JsonNode entryNode = logIterator.next();
+        metadataEntries.add(new MetadataLogEntry(
+                JsonUtil.getLong(TIMESTAMP_MS, entryNode), JsonUtil.getString(METADATA_FILE, entryNode)));
+      }
+    }
+
+    return new TableMetadata(file, uuid, location,
         lastUpdatedMillis, lastAssignedColumnId, schema, defaultSpecId, specs, properties,
-        currentVersionId, snapshots, ImmutableList.copyOf(entries.iterator()));
+        currentVersionId, snapshots, ImmutableList.copyOf(entries.iterator()),
+        ImmutableList.copyOf(metadataEntries.iterator()));
   }
 }

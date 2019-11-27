@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.function.Function;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.Metrics;
+import org.apache.iceberg.MetricsConfig;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.common.DynConstructors;
 import org.apache.iceberg.common.DynMethods;
@@ -42,10 +43,6 @@ import org.apache.parquet.hadoop.ParquetFileWriter;
 import org.apache.parquet.hadoop.metadata.CompressionCodecName;
 import org.apache.parquet.schema.MessageType;
 
-import static java.lang.Math.max;
-import static java.lang.Math.min;
-import static org.apache.iceberg.parquet.ParquetSchemaUtil.convert;
-
 class ParquetWriter<T> implements FileAppender<T>, Closeable {
   private static final DynConstructors.Ctor<PageWriteStore> pageStoreCtor = DynConstructors
       .builder(PageWriteStore.class)
@@ -60,7 +57,6 @@ class ParquetWriter<T> implements FileAppender<T>, Closeable {
       .hiddenImpl("org.apache.parquet.hadoop.ColumnChunkPageWriteStore", ParquetFileWriter.class)
       .build();
 
-  private final OutputFile output;
   private final long targetRowGroupSize;
   private final Map<String, String> metadata;
   private final ParquetProperties props;
@@ -68,6 +64,7 @@ class ParquetWriter<T> implements FileAppender<T>, Closeable {
   private final MessageType parquetSchema;
   private final ParquetValueWriter<T> model;
   private final ParquetFileWriter writer;
+  private final MetricsConfig metricsConfig;
 
   private DynMethods.BoundMethod flushPageStoreToWriter;
   private ColumnWriteStore writeStore;
@@ -80,18 +77,20 @@ class ParquetWriter<T> implements FileAppender<T>, Closeable {
                 Map<String, String> metadata,
                 Function<MessageType, ParquetValueWriter<?>> createWriterFunc,
                 CompressionCodecName codec,
-                ParquetProperties properties) {
-    this.output = output;
+                ParquetProperties properties,
+                MetricsConfig metricsConfig,
+                ParquetFileWriter.Mode writeMode) {
     this.targetRowGroupSize = rowGroupSize;
     this.props = properties;
     this.metadata = ImmutableMap.copyOf(metadata);
     this.compressor = new CodecFactory(conf, props.getPageSizeThreshold()).getCompressor(codec);
-    this.parquetSchema = convert(schema, "table");
+    this.parquetSchema = ParquetSchemaUtil.convert(schema, "table");
     this.model = (ParquetValueWriter<T>) createWriterFunc.apply(parquetSchema);
+    this.metricsConfig = metricsConfig;
 
     try {
       this.writer = new ParquetFileWriter(ParquetIO.file(output, conf), parquetSchema,
-          ParquetFileWriter.Mode.OVERWRITE, rowGroupSize, 0);
+         writeMode, rowGroupSize, 0);
     } catch (IOException e) {
       throw new RuntimeIOException(e, "Failed to create Parquet file");
     }
@@ -115,13 +114,13 @@ class ParquetWriter<T> implements FileAppender<T>, Closeable {
 
   @Override
   public Metrics metrics() {
-    return ParquetUtil.footerMetrics(writer.getFooter());
+    return ParquetUtil.footerMetrics(writer.getFooter(), metricsConfig);
   }
 
   @Override
   public long length() {
     try {
-      return writer.getPos();
+      return writer.getPos() + writeStore.getBufferedSize();
     } catch (IOException e) {
       throw new RuntimeIOException(e, "Failed to get file length");
     }
@@ -142,7 +141,7 @@ class ParquetWriter<T> implements FileAppender<T>, Closeable {
       } else {
         long remainingSpace = nextRowGroupSize - bufferedSize;
         long remainingRecords = (long) (remainingSpace / avgRecordSize);
-        this.nextCheckRecordCount = recordCount + min(max(remainingRecords / 2, 100), 10000);
+        this.nextCheckRecordCount = recordCount + Math.min(Math.max(remainingRecords / 2, 100), 10000);
       }
     }
   }
@@ -165,11 +164,11 @@ class ParquetWriter<T> implements FileAppender<T>, Closeable {
 
   private void startRowGroup() {
     try {
-      this.nextRowGroupSize = min(writer.getNextRowGroupSize(), targetRowGroupSize);
+      this.nextRowGroupSize = Math.min(writer.getNextRowGroupSize(), targetRowGroupSize);
     } catch (IOException e) {
       throw new RuntimeIOException(e);
     }
-    this.nextCheckRecordCount = min(max(recordCount / 2, 100), 10000);
+    this.nextCheckRecordCount = Math.min(Math.max(recordCount / 2, 100), 10000);
     this.recordCount = 0;
 
     PageWriteStore pageStore = pageStoreCtor.newInstance(

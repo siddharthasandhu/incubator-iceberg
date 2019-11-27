@@ -19,6 +19,7 @@
 
 package org.apache.iceberg;
 
+import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
@@ -281,8 +282,7 @@ public class GenericManifestFile
   public boolean equals(Object other) {
     if (this == other) {
       return true;
-    }
-    if (other == null || getClass() != other.getClass()) {
+    } else if (!(other instanceof GenericManifestFile)) {
       return false;
     }
     GenericManifestFile that = (GenericManifestFile) other;
@@ -296,7 +296,7 @@ public class GenericManifestFile
 
   @Override
   public String toString() {
-    return Objects.toStringHelper(this)
+    return MoreObjects.toStringHelper(this)
         .add("path", manifestPath)
         .add("length", length)
         .add("partition_spec_id", specId)

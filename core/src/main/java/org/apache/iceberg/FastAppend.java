@@ -51,6 +51,11 @@ class FastAppend extends SnapshotProducer<AppendFiles> implements AppendFiles {
   }
 
   @Override
+  protected AppendFiles self() {
+    return this;
+  }
+
+  @Override
   public AppendFiles set(String property, String value) {
     summaryBuilder.set(property, value);
     return this;
@@ -78,7 +83,7 @@ class FastAppend extends SnapshotProducer<AppendFiles> implements AppendFiles {
   public FastAppend appendManifest(ManifestFile manifest) {
     // the manifest must be rewritten with this update's snapshot ID
     try (ManifestReader reader = ManifestReader.read(
-        ops.io().newInputFile(manifest.path()), ops.current()::spec)) {
+        ops.io().newInputFile(manifest.path()), ops.current().specsById())) {
       OutputFile newManifestPath = manifestPath(manifestCount.getAndIncrement());
       appendManifests.add(ManifestWriter.copyAppendManifest(reader, newManifestPath, snapshotId(), summaryBuilder));
     } catch (IOException e) {

@@ -20,7 +20,9 @@
 package org.apache.iceberg.spark.data;
 
 import java.io.IOException;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.types.TypeUtil;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.types.Types.ListType;
 import org.apache.iceberg.types.Types.LongType;
@@ -49,7 +51,7 @@ public abstract class AvroDataTest {
       required(108, "ts", Types.TimestampType.withZone()),
       required(110, "s", Types.StringType.get()),
       //required(111, "uuid", Types.UUIDType.get()),
-      //required(112, "fixed", Types.FixedType.ofLength(7)),
+      required(112, "fixed", Types.FixedType.ofLength(7)),
       optional(113, "bytes", Types.BinaryType.get()),
       required(114, "dec_9_0", Types.DecimalType.of(9, 0)),
       required(115, "dec_11_2", Types.DecimalType.of(11, 2)),
@@ -61,7 +63,7 @@ public abstract class AvroDataTest {
 
   @Test
   public void testSimpleStruct() throws IOException {
-    writeAndValidate(new Schema(SUPPORTED_PRIMITIVES.fields()));
+    writeAndValidate(TypeUtil.assignIncreasingFreshIds(new Schema(SUPPORTED_PRIMITIVES.fields())));
   }
 
   @Test
@@ -75,9 +77,9 @@ public abstract class AvroDataTest {
 
   @Test
   public void testArrayOfStructs() throws IOException {
-    Schema schema = new Schema(
+    Schema schema = TypeUtil.assignIncreasingFreshIds(new Schema(
         required(0, "id", LongType.get()),
-        optional(1, "data", ListType.ofOptional(2, SUPPORTED_PRIMITIVES)));
+        optional(1, "data", ListType.ofOptional(2, SUPPORTED_PRIMITIVES))));
 
     writeAndValidate(schema);
   }
@@ -119,18 +121,18 @@ public abstract class AvroDataTest {
 
   @Test
   public void testMapOfStructs() throws IOException {
-    Schema schema = new Schema(
+    Schema schema = TypeUtil.assignIncreasingFreshIds(new Schema(
         required(0, "id", LongType.get()),
         optional(1, "data", MapType.ofOptional(2, 3,
             Types.StringType.get(),
-            SUPPORTED_PRIMITIVES)));
+            SUPPORTED_PRIMITIVES))));
 
     writeAndValidate(schema);
   }
 
   @Test
   public void testMixedTypes() throws IOException {
-    Schema schema = new Schema(
+    StructType structType = StructType.of(
         required(0, "id", LongType.get()),
         optional(1, "list_of_maps",
             ListType.ofOptional(2, MapType.ofOptional(3, 4,
@@ -159,6 +161,9 @@ public abstract class AvroDataTest {
                 SUPPORTED_PRIMITIVES))
         )))
     );
+
+    Schema schema = new Schema(TypeUtil.assignFreshIds(structType, new AtomicInteger(0)::incrementAndGet)
+        .asStructType().fields());
 
     writeAndValidate(schema);
   }

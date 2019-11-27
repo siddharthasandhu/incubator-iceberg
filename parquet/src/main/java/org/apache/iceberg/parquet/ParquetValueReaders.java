@@ -53,10 +53,14 @@ public class ParquetValueReaders {
     return (ParquetValueReader<T>) NullReader.INSTANCE;
   }
 
+  public static <C> ParquetValueReader<C> constant(C value) {
+    return new ConstantReader<>(value);
+  }
+
   private static class NullReader<T> implements ParquetValueReader<T> {
     private static final NullReader<Void> INSTANCE = new NullReader<>();
-    private static final List<TripleIterator<?>> COLUMNS = ImmutableList.of();
-    private static final TripleIterator<?> NULL_COLUMN = new TripleIterator<Object> () {
+    private static final ImmutableList<TripleIterator<?>> COLUMNS = ImmutableList.of();
+    private static final TripleIterator<?> NULL_COLUMN = new TripleIterator<Object>() {
       @Override
       public int currentDefinitionLevel() {
         return 0;
@@ -106,8 +110,36 @@ public class ParquetValueReaders {
     }
   }
 
+  static class ConstantReader<C> implements ParquetValueReader<C> {
+    private final C constantValue;
+
+    ConstantReader(C constantValue) {
+      this.constantValue = constantValue;
+    }
+
+    @Override
+    public C read(C reuse) {
+      return constantValue;
+    }
+
+    @Override
+    public TripleIterator<?> column() {
+      return NullReader.NULL_COLUMN;
+    }
+
+    @Override
+    public List<TripleIterator<?>> columns() {
+      return NullReader.COLUMNS;
+    }
+
+    @Override
+    public void setPageSource(PageReadStore pageStore) {
+    }
+  }
+
   public abstract static class PrimitiveReader<T> implements ParquetValueReader<T> {
     private final ColumnDescriptor desc;
+    @SuppressWarnings("checkstyle:VisibilityModifier")
     protected final ColumnIterator<?> column;
     private final List<TripleIterator<?>> children;
 
@@ -306,8 +338,8 @@ public class ParquetValueReaders {
         return reader.read(reuse);
       }
 
-      for (TripleIterator<?> column : children) {
-        column.nextNull();
+      for (TripleIterator<?> child : children) {
+        child.nextNull();
       }
 
       return null;
@@ -353,8 +385,8 @@ public class ParquetValueReaders {
           addElement(intermediate, reader.read(getElement(intermediate)));
         } else {
           // consume the empty list triple
-          for (TripleIterator<?> column : children) {
-            column.nextNull();
+          for (TripleIterator<?> child : children) {
+            child.nextNull();
           }
           // if the current definition level is equal to the definition level of this repeated type,
           // then the result is an empty list and the repetition level will always be <= rl.
@@ -471,8 +503,8 @@ public class ParquetValueReaders {
           addPair(intermediate, keyReader.read(pair.getKey()), valueReader.read(pair.getValue()));
         } else {
           // consume the empty map triple
-          for (TripleIterator<?> column : children) {
-            column.nextNull();
+          for (TripleIterator<?> child : children) {
+            child.nextNull();
           }
           // if the current definition level is equal to the definition level of this repeated type,
           // then the result is an empty list and the repetition level will always be <= rl.
@@ -553,9 +585,9 @@ public class ParquetValueReaders {
     private K key = null;
     private V value = null;
 
-    public void set(K key, V value) {
-      this.key = key;
-      this.value = value;
+    public void set(K newKey, V  newValue) {
+      this.key = newKey;
+      this.value =  newValue;
     }
 
     @Override
@@ -569,9 +601,9 @@ public class ParquetValueReaders {
     }
 
     @Override
-    public V setValue(V value) {
+    public V setValue(V newValue) {
       V lastValue = this.value;
-      this.value = value;
+      this.value = newValue;
       return lastValue;
     }
   }
@@ -583,32 +615,26 @@ public class ParquetValueReaders {
 
     private final ParquetValueReader<?>[] readers;
     private final TripleIterator<?> column;
-    private final TripleIterator<?>[] columns;
-    private final Setter<I>[] setters;
     private final List<TripleIterator<?>> children;
 
     @SuppressWarnings("unchecked")
     protected StructReader(List<Type> types, List<ParquetValueReader<?>> readers) {
       this.readers = (ParquetValueReader<?>[]) Array.newInstance(
           ParquetValueReader.class, readers.size());
-      this.columns = (TripleIterator<?>[]) Array.newInstance(TripleIterator.class, readers.size());
-      this.setters = (Setter<I>[]) Array.newInstance(Setter.class, readers.size());
+      TripleIterator<?>[] columns = (TripleIterator<?>[]) Array.newInstance(TripleIterator.class, readers.size());
+      Setter<I>[] setters = (Setter<I>[]) Array.newInstance(Setter.class, readers.size());
 
       ImmutableList.Builder<TripleIterator<?>> columnsBuilder = ImmutableList.builder();
       for (int i = 0; i < readers.size(); i += 1) {
         ParquetValueReader<?> reader = readers.get(i);
         this.readers[i] = readers.get(i);
-        this.columns[i] = reader.column();
-        this.setters[i] = newSetter(reader, types.get(i));
+        columns[i] = reader.column();
+        setters[i] = newSetter(reader, types.get(i));
         columnsBuilder.addAll(reader.columns());
       }
 
       this.children = columnsBuilder.build();
-      if (children.size() > 0) {
-        this.column = children.get(0);
-      } else {
-        this.column = NullReader.NULL_COLUMN;
-      }
+      this.column = firstNonNullColumn(children);
     }
 
     @Override
@@ -718,6 +744,21 @@ public class ParquetValueReaders {
 
     protected void setDouble(I struct, int pos, double value) {
       set(struct, pos, value);
+    }
+
+    /**
+     * Find a non-null column or return NULL_COLUMN if one is not available.
+     *
+     * @param columns a collection of triple iterator columns
+     * @return the first non-null column in columns
+     */
+    private TripleIterator<?> firstNonNullColumn(List<TripleIterator<?>> columns) {
+      for (TripleIterator<?> col : columns) {
+        if (col != NullReader.NULL_COLUMN) {
+          return col;
+        }
+      }
+      return NullReader.NULL_COLUMN;
     }
   }
 }

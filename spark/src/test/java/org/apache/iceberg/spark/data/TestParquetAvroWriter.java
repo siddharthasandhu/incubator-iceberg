@@ -66,7 +66,8 @@ public class TestParquetAvroWriter {
       optional(19, "renovate", Types.MapType.ofRequired(20, 21,
           Types.StringType.get(), Types.StructType.of(
               optional(22, "jumpy", Types.DoubleType.get()),
-              required(23, "koala", Types.TimeType.get())
+              required(23, "koala", Types.TimeType.get()),
+              required(24, "couch rope", Types.IntegerType.get())
           ))),
       optional(2, "slide", Types.StringType.get())
   );
@@ -94,12 +95,12 @@ public class TestParquetAvroWriter {
         .createReaderFunc(
             fileSchema -> ParquetAvroValueReaders.buildReader(COMPLEX_SCHEMA, readSchema))
         .build()) {
-      int i = 0;
+      int recordNum = 0;
       Iterator<Record> iter = records.iterator();
       for (Record actual : reader) {
         Record expected = iter.next();
-        Assert.assertEquals("Record " + i + " should match expected", expected, actual);
-        i += 1;
+        Assert.assertEquals("Record " + recordNum + " should match expected", expected, actual);
+        recordNum += 1;
       }
     }
   }

@@ -66,7 +66,8 @@ public class TestParquetAvroReader {
       optional(19, "renovate", Types.MapType.ofRequired(20, 21,
           Types.StringType.get(), Types.StructType.of(
               optional(22, "jumpy", Types.DoubleType.get()),
-              required(23, "koala", Types.TimeType.get())
+              required(23, "koala", Types.TimeType.get()),
+              required(24, "couch rope", Types.IntegerType.get())
           ))),
       optional(2, "slide", Types.StringType.get())
   );
@@ -93,9 +94,9 @@ public class TestParquetAvroReader {
     long sum = 0;
     long sumSq = 0;
     int warmups = 2;
-    int n = 10;
+    int trials = 10;
 
-    for (int i = 0; i < warmups + n; i += 1) {
+    for (int i = 0; i < warmups + trials; i += 1) {
       // clean up as much memory as possible to avoid a large GC during the timed run
       System.gc();
 
@@ -120,16 +121,16 @@ public class TestParquetAvroReader {
 
         if (i >= warmups) {
           sum += duration;
-          sumSq += (duration * duration);
+          sumSq += duration * duration;
         }
       }
     }
 
-    double mean = ((double) sum) / n;
-    double stddev = Math.sqrt((((double) sumSq) / n) - (mean * mean));
+    double mean = ((double) sum) / trials;
+    double stddev = Math.sqrt((((double) sumSq) / trials) - (mean * mean));
 
     System.err.println(String.format(
-        "Ran %d trials: mean time: %.3f ms, stddev: %.3f ms", n, mean, stddev));
+        "Ran %d trials: mean time: %.3f ms, stddev: %.3f ms", trials, mean, stddev));
   }
 
   @Ignore
@@ -206,24 +207,24 @@ public class TestParquetAvroReader {
             fileSchema -> ParquetAvroValueReaders.buildReader(COMPLEX_SCHEMA, readSchema))
         .reuseContainers()
         .build()) {
-      int i = 0;
+      int recordNum = 0;
       Iterator<Record> iter = records.iterator();
       for (Record actual : reader) {
         Record expected = iter.next();
-        Assert.assertEquals("Record " + i + " should match expected", expected, actual);
-        i += 1;
+        Assert.assertEquals("Record " + recordNum + " should match expected", expected, actual);
+        recordNum += 1;
       }
     }
   }
 
-  private File writeTestData(Schema schema, int n, int seed) throws IOException {
+  private File writeTestData(Schema schema, int numRecords, int seed) throws IOException {
     File testFile = temp.newFile();
     Assert.assertTrue("Delete should succeed", testFile.delete());
 
     try (FileAppender<Record> writer = Parquet.write(Files.localOutput(testFile))
         .schema(schema)
         .build()) {
-      writer.addAll(RandomData.generate(schema, n, seed));
+      writer.addAll(RandomData.generate(schema, numRecords, seed));
     }
 
     return testFile;

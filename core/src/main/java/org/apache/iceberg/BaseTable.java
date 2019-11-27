@@ -19,6 +19,7 @@
 
 package org.apache.iceberg;
 
+import java.util.List;
 import java.util.Map;
 import org.apache.iceberg.encryption.EncryptionManager;
 import org.apache.iceberg.io.FileIO;
@@ -50,7 +51,7 @@ public class BaseTable implements Table, HasTableOperations {
 
   @Override
   public TableScan newScan() {
-    return new BaseTableScan(ops, this);
+    return new DataTableScan(ops, this);
   }
 
   @Override
@@ -61,6 +62,11 @@ public class BaseTable implements Table, HasTableOperations {
   @Override
   public PartitionSpec spec() {
     return ops.current().spec();
+  }
+
+  @Override
+  public Map<Integer, PartitionSpec> specs() {
+    return ops.current().specsById();
   }
 
   @Override
@@ -79,8 +85,18 @@ public class BaseTable implements Table, HasTableOperations {
   }
 
   @Override
+  public Snapshot snapshot(long snapshotId) {
+    return ops.current().snapshot(snapshotId);
+  }
+
+  @Override
   public Iterable<Snapshot> snapshots() {
     return ops.current().snapshots();
+  }
+
+  @Override
+  public List<HistoryEntry> history() {
+    return ops.current().snapshotLog();
   }
 
   @Override
@@ -110,22 +126,22 @@ public class BaseTable implements Table, HasTableOperations {
 
   @Override
   public RewriteFiles newRewrite() {
-    return new ReplaceFiles(ops);
+    return new BaseRewriteFiles(ops);
   }
 
   @Override
   public RewriteManifests rewriteManifests() {
-    return new ReplaceManifests(ops);
+    return new BaseRewriteManifests(ops);
   }
 
   @Override
   public OverwriteFiles newOverwrite() {
-    return new OverwriteData(ops);
+    return new BaseOverwriteFiles(ops);
   }
 
   @Override
   public ReplacePartitions newReplacePartitions() {
-    return new ReplacePartitionsOperation(ops);
+    return new BaseReplacePartitions(ops);
   }
 
   @Override
@@ -145,7 +161,7 @@ public class BaseTable implements Table, HasTableOperations {
 
   @Override
   public Transaction newTransaction() {
-    return BaseTransaction.newTransaction(ops);
+    return Transactions.newTransaction(ops);
   }
 
   @Override

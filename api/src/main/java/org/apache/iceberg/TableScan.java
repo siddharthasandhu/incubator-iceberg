@@ -59,6 +59,16 @@ public interface TableScan {
   TableScan asOfTime(long timestampMillis);
 
   /**
+   * Create a new {@link TableScan} from this scan's configuration that will override the {@link Table}'s behavior based
+   * on the incoming pair. Unknown properties will be ignored.
+   *
+   * @param property name of the table property to be overridden
+   * @param value value to override with
+   * @return a new scan based on this with overridden behavior
+   */
+  TableScan option(String property, String value);
+
+  /**
    * Create a new {@link TableScan} from this with the schema as its projection.
    *
    * @param schema a projection schema
@@ -154,6 +164,16 @@ public interface TableScan {
    * @return this scan's projection schema
    */
   Schema schema();
+
+  /**
+   * Returns the {@link Snapshot} that will be used by this scan.
+   * <p>
+   * If the snapshot was not configured using {@link #asOfTime(long)} or {@link #useSnapshot(long)}, the current table
+   * snapshot will be used.
+   *
+   * @return the Snapshot this scan will use
+   */
+  Snapshot snapshot();
 
   /**
    * Returns whether this scan should apply column name case sensitiveness as per {@link #caseSensitive(boolean)}.

@@ -25,6 +25,7 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.UUID;
 import org.apache.avro.Schema;
@@ -41,8 +42,15 @@ import org.apache.spark.sql.types.Decimal;
 import org.apache.spark.unsafe.types.UTF8String;
 
 public class SparkValueReaders {
+
+  private SparkValueReaders() {}
+
   static ValueReader<UTF8String> strings() {
     return StringReader.INSTANCE;
+  }
+
+  static ValueReader<UTF8String> enums(List<String> symbols) {
+    return new EnumReader(symbols);
   }
 
   static ValueReader<UTF8String> uuids() {
@@ -71,7 +79,7 @@ public class SparkValueReaders {
   }
 
   private static class StringReader implements ValueReader<UTF8String> {
-    private static StringReader INSTANCE = new StringReader();
+    private static final StringReader INSTANCE = new StringReader();
 
     private StringReader() {
     }
@@ -93,6 +101,23 @@ public class SparkValueReaders {
     }
   }
 
+  private static class EnumReader implements ValueReader<UTF8String> {
+    private final UTF8String[] symbols;
+
+    private EnumReader(List<String> symbols) {
+      this.symbols = new UTF8String[symbols.size()];
+      for (int i = 0; i < this.symbols.length; i += 1) {
+        this.symbols[i] = UTF8String.fromBytes(symbols.get(i).getBytes(StandardCharsets.UTF_8));
+      }
+    }
+
+    @Override
+    public UTF8String read(Decoder decoder, Object ignore) throws IOException {
+      int index = decoder.readEnum();
+      return symbols[index];
+    }
+  }
+
   private static class UUIDReader implements ValueReader<UTF8String> {
     private static final ThreadLocal<ByteBuffer> BUFFER = ThreadLocal.withInitial(() -> {
       ByteBuffer buffer = ByteBuffer.allocate(16);
@@ -100,7 +125,7 @@ public class SparkValueReaders {
       return buffer;
     });
 
-    private static UUIDReader INSTANCE = new UUIDReader();
+    private static final UUIDReader INSTANCE = new UUIDReader();
 
     private UUIDReader() {
     }
@@ -229,13 +254,17 @@ public class SparkValueReaders {
   }
 
   static class StructReader implements ValueReader<InternalRow> {
-    final ValueReader<?>[] readers;
+    private final ValueReader<?>[] readers;
 
     private StructReader(List<ValueReader<?>> readers) {
       this.readers = new ValueReader[readers.size()];
       for (int i = 0; i < this.readers.length; i += 1) {
         this.readers[i] = readers.get(i);
       }
+    }
+
+    ValueReader<?>[] readers() {
+      return readers;
     }
 
     @Override
